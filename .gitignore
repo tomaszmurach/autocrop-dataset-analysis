@@ -1,0 +1,93 @@
+# Private datasets and operator-local inputs
+/data/
+/dataset/
+/datasets/
+/photos/
+/images/
+/input/
+/inputs/
+/private/
+/client-data/
+/client_data/
+
+# Photographs must never be tracked, wherever they are placed
+*.jpg
+*.jpeg
+*.jpe
+*.png
+*.gif
+*.bmp
+*.tif
+*.tiff
+*.webp
+*.heic
+*.heif
+*.avif
+*.dng
+*.cr2
+*.cr3
+*.nef
+*.arw
+*.orf
+*.rw2
+
+# Generated manifests and analysis outputs may contain private paths/metadata
+/manifests/
+/outputs/
+/output/
+/analysis-output/
+/analysis_outputs/
+/reports/
+/results/
+/artifacts/
+*.manifest.csv
+*.manifest.json
+*.manifest.jsonl
+audit_manifest*.csv
+audit_manifest*.json
+audit_manifest*.jsonl
+pair_manifest*.csv
+pair_manifest*.json
+pair_manifest*.jsonl
+*.private.csv
+*.private.json
+*.private.jsonl
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.local.toml
+*.local.yaml
+*.local.yml
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python caches, test output, and build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# IDE and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+

@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autocrop-dataset-analysis"
+version = "0.1.0"
+description = "Developer-side tools for auditing and analyzing AutoCrop datasets."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "Pillow>=11.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
