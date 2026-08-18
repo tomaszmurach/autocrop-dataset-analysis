@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from io import StringIO
 import json
 from pathlib import Path
@@ -76,6 +77,35 @@ class ContentMatchCliTests(unittest.TestCase):
         )
         return source_name, distractor_name, crop_name
 
+    def build_in_memory_manifest(self):
+        paths = content_match_cli.validate_paths(
+            self.originals,
+            self.cropped,
+            self.output(),
+        )
+        parameters = content_matching.MatchingParameters()
+        prepared = content_match_cli.prepare_inputs(paths, parameters)
+        initial_results = content_match_cli.match_crops(
+            prepared.crops,
+            prepared.originals,
+            parameters,
+            candidate_set_complete=prepared.candidate_set_complete,
+        )
+        results, candidate_set_complete = (
+            content_match_cli.finalize_candidate_set_completeness(
+                initial_results,
+                preprocessed_candidate_set_complete=prepared.candidate_set_complete,
+            )
+        )
+        manifest = content_match_cli.build_manifest(
+            paths,
+            prepared,
+            results,
+            parameters,
+            candidate_set_complete=candidate_set_complete,
+        )
+        return prepared, manifest
+
     def test_end_to_end_private_result_and_aggregate_console(self) -> None:
         source_name, distractor_name, crop_name = self.create_dataset()
         originals_before = {path.name: path.read_bytes() for path in self.originals.iterdir()}
@@ -97,6 +127,7 @@ class ContentMatchCliTests(unittest.TestCase):
         ):
             self.assertNotIn(private_value, stdout.getvalue())
         manifest = json.loads(self.output().read_text(encoding="utf-8"))
+        self.assertEqual(manifest["schema_version"], "1.1")
         self.assertEqual(
             set(manifest),
             {"schema_version", "tool_version", "runtime", "algorithm", "parameters", "roots", "summary", "crops"},
@@ -108,12 +139,132 @@ class ContentMatchCliTests(unittest.TestCase):
         crop_result = manifest["crops"][0]
         self.assertEqual(crop_result["decision"], "MATCHED")
         self.assertEqual(crop_result["provenance_interpretation"], "UNIQUE_STRONG_PROVENANCE")
+        self.assertEqual(
+            (crop_result["crop"]["display_width"], crop_result["crop"]["display_height"]),
+            (216, 164),
+        )
         self.assertEqual(crop_result["ranked_candidates"][0]["original"]["relative_path"], source_name)
+        self.assertTrue(
+            all(
+                (
+                    candidate["original"]["display_width"],
+                    candidate["original"]["display_height"],
+                )
+                == (420, 320)
+                for candidate in crop_result["ranked_candidates"]
+            )
+        )
         serialized = json.dumps(manifest).casefold()
         self.assertNotIn("accuracy", serialized)
         self.assertNotIn("ground_truth", serialized)
         self.assertEqual({path.name: path.read_bytes() for path in self.originals.iterdir()}, originals_before)
         self.assertEqual({path.name: path.read_bytes() for path in self.cropped.iterdir()}, crops_before)
+
+    def test_serialized_dimensions_match_prepared_feature_images(self) -> None:
+        self.create_dataset()
+
+        prepared, manifest = self.build_in_memory_manifest()
+
+        crop_images = {
+            image.reference.relative_path: image for image in prepared.crops
+        }
+        original_images = {
+            image.reference.relative_path: image for image in prepared.originals
+        }
+        for crop_result in manifest["crops"]:
+            crop_record = crop_result["crop"]
+            crop_image = crop_images[crop_record["relative_path"]]
+            self.assertEqual(
+                (crop_record["display_width"], crop_record["display_height"]),
+                (crop_image.width, crop_image.height),
+            )
+            for candidate in crop_result["ranked_candidates"]:
+                original_record = candidate["original"]
+                original_image = original_images[original_record["relative_path"]]
+                self.assertEqual(
+                    (
+                        original_record["display_width"],
+                        original_record["display_height"],
+                    ),
+                    (original_image.width, original_image.height),
+                )
+
+    def test_exif_normalized_display_dimensions_are_serialized(self) -> None:
+        display_original = structured_image(31, (420, 320))
+        display_crop = display_original.crop((80, 55, 350, 260)).resize(
+            (216, 164), Image.Resampling.LANCZOS
+        )
+        original_name = "private-oriented-original.jpg"
+        crop_name = "private-oriented-crop.jpg"
+        exif = Image.Exif()
+        exif[274] = 6
+        display_original.transpose(Image.Transpose.ROTATE_90).save(
+            self.originals / original_name,
+            format="JPEG",
+            quality=96,
+            exif=exif,
+        )
+        display_crop.transpose(Image.Transpose.ROTATE_90).save(
+            self.cropped / crop_name,
+            format="JPEG",
+            quality=82,
+            exif=exif,
+        )
+        with Image.open(self.originals / original_name) as encoded_original:
+            self.assertEqual(encoded_original.size, (320, 420))
+        with Image.open(self.cropped / crop_name) as encoded_crop:
+            self.assertEqual(encoded_crop.size, (164, 216))
+
+        self.assertEqual(
+            content_match_cli.main(
+                self.argv(), stdout=StringIO(), stderr=StringIO()
+            ),
+            0,
+        )
+
+        manifest = json.loads(self.output().read_text(encoding="utf-8"))
+        crop_result = manifest["crops"][0]
+        self.assertEqual(
+            (
+                crop_result["crop"]["display_width"],
+                crop_result["crop"]["display_height"],
+            ),
+            (216, 164),
+        )
+        original = crop_result["ranked_candidates"][0]["original"]
+        self.assertEqual(
+            (original["display_width"], original["display_height"]),
+            (420, 320),
+        )
+
+    def test_ranked_candidates_preserve_distinct_original_dimensions(self) -> None:
+        source_name = "private-source-420x320.png"
+        distractor_name = "private-distractor-520x360.png"
+        crop_name = "private-manual-crop.jpg"
+        source = structured_image(51, (420, 320))
+        source.save(self.originals / source_name)
+        structured_image(52, (520, 360)).save(self.originals / distractor_name)
+        source.crop((80, 55, 350, 260)).resize(
+            (216, 164), Image.Resampling.LANCZOS
+        ).save(self.cropped / crop_name, format="JPEG", quality=70)
+
+        self.assertEqual(
+            content_match_cli.main(
+                self.argv(), stdout=StringIO(), stderr=StringIO()
+            ),
+            0,
+        )
+
+        manifest = json.loads(self.output().read_text(encoding="utf-8"))
+        candidates = {
+            candidate["original"]["relative_path"]: (
+                candidate["original"]["display_width"],
+                candidate["original"]["display_height"],
+            )
+            for candidate in manifest["crops"][0]["ranked_candidates"]
+        }
+        self.assertEqual(candidates[source_name], (420, 320))
+        self.assertEqual(candidates[distractor_name], (520, 360))
 
     def test_absolute_roots_appear_only_once_each(self) -> None:
         self.create_dataset()
@@ -201,7 +352,83 @@ class ContentMatchCliTests(unittest.TestCase):
             manifest["crops"][0]["diagnostic_reason"],
             "INCOMPLETE_CANDIDATE_SET",
         )
+        unavailable_candidate = next(
+            candidate
+            for candidate in manifest["crops"][0]["ranked_candidates"]
+            if candidate["original"]["relative_path"] == unavailable_name
+        )
+        self.assertIsNone(unavailable_candidate["original"]["display_width"])
+        self.assertIsNone(unavailable_candidate["original"]["display_height"])
         self.assertNotIn(unavailable_name, stdout.getvalue())
+
+    def test_known_dimensions_survive_feature_failures_after_decode(self) -> None:
+        source_name, _, crop_name = self.create_dataset()
+        failed_original_name = "private-known-size-feature-failure.png"
+        structured_image(13, (510, 340)).save(
+            self.originals / failed_original_name
+        )
+        real_extract = content_match_cli.extract_features
+
+        def fail_after_decode(path, semantic_reference, parameters, *, retain_grayscale):
+            image = real_extract(
+                path,
+                semantic_reference,
+                parameters,
+                retain_grayscale=retain_grayscale,
+            )
+            if path.name in {failed_original_name, crop_name}:
+                return replace(
+                    image,
+                    keypoints=(),
+                    descriptors=None,
+                    diagnostic_reason="SyntheticPostDecodeFeatureFailure",
+                )
+            return image
+
+        with mock.patch(
+            "autocrop_analysis.content_match_cli.extract_features",
+            side_effect=fail_after_decode,
+        ):
+            self.assertEqual(
+                content_match_cli.main(
+                    self.argv(), stdout=StringIO(), stderr=StringIO()
+                ),
+                0,
+            )
+
+        manifest = json.loads(self.output().read_text(encoding="utf-8"))
+        crop_result = manifest["crops"][0]
+        self.assertEqual(
+            (
+                crop_result["crop"]["display_width"],
+                crop_result["crop"]["display_height"],
+            ),
+            (216, 164),
+        )
+        failed_candidate = next(
+            candidate
+            for candidate in crop_result["ranked_candidates"]
+            if candidate["original"]["relative_path"] == failed_original_name
+        )
+        self.assertEqual(
+            (
+                failed_candidate["original"]["display_width"],
+                failed_candidate["original"]["display_height"],
+            ),
+            (510, 340),
+        )
+        source_candidate = next(
+            candidate
+            for candidate in crop_result["ranked_candidates"]
+            if candidate["original"]["relative_path"] == source_name
+        )
+        self.assertEqual(
+            (
+                source_candidate["original"]["display_width"],
+                source_candidate["original"]["display_height"],
+            ),
+            (420, 320),
+        )
 
     def test_lazy_decode_failure_forces_run_wide_ambiguous_finalization(self) -> None:
         lazy_name = "private-lazy-source.png"
@@ -293,6 +520,18 @@ class ContentMatchCliTests(unittest.TestCase):
                 )
                 for candidate in crop_a["ranked_candidates"]
             )
+        )
+        lazy_candidate = next(
+            candidate
+            for candidate in crop_a["ranked_candidates"]
+            if candidate["original"]["relative_path"] == lazy_name
+        )
+        self.assertEqual(
+            (
+                lazy_candidate["original"]["display_width"],
+                lazy_candidate["original"]["display_height"],
+            ),
+            (420, 320),
         )
         crop_b = next(
             result
