@@ -15,7 +15,14 @@ import numpy as np
 import PIL
 
 from . import __version__
-from .audit import AuditItem, ReadStatus, RootRole, audit_datasets, audit_item_sort_key
+from .audit import (
+    AuditItem,
+    ReadStatus,
+    RootRole,
+    SemanticReference,
+    audit_datasets,
+    audit_item_sort_key,
+)
 from .cli import ConfigurationError, OutputFailure, ValidatedPaths, validate_paths, write_manifest_atomic
 from .content_matching import (
     ALGORITHM_NAME,
@@ -33,7 +40,7 @@ from .content_matching import (
 )
 
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +163,8 @@ def build_manifest(
     *,
     candidate_set_complete: bool,
 ) -> dict[str, object]:
+    crop_images = _index_feature_images(prepared.crops)
+    original_images = _index_feature_images(prepared.originals)
     decisions = Counter(result.decision.value for result in results)
     lazy_unavailable_originals = {
         candidate.original
@@ -230,18 +239,64 @@ def build_manifest(
             "NO_MATCH": decisions[ContentDecision.NO_MATCH.value],
             "NO_VALID_PROVENANCE": decisions[ContentDecision.NO_MATCH.value],
         },
-        "crops": [_serialize_crop_result(result) for result in results],
+        "crops": [
+            _serialize_crop_result(result, crop_images, original_images)
+            for result in results
+        ],
     }
 
 
-def _serialize_reference(reference) -> dict[str, str]:
+def _index_feature_images(
+    images: tuple[FeatureImage, ...],
+) -> dict[SemanticReference, FeatureImage]:
+    indexed: dict[SemanticReference, FeatureImage] = {}
+    for image in images:
+        if image.reference in indexed:
+            raise ValueError("DUPLICATE_FEATURE_IMAGE_REFERENCE")
+        indexed[image.reference] = image
+    return indexed
+
+
+def _require_feature_image(
+    reference: SemanticReference,
+    images: dict[SemanticReference, FeatureImage],
+) -> FeatureImage:
+    try:
+        return images[reference]
+    except KeyError as exc:
+        raise ValueError("MISSING_FEATURE_IMAGE_REFERENCE") from exc
+
+
+def _serialize_reference(
+    reference: SemanticReference,
+    image: FeatureImage,
+) -> dict[str, str | int | None]:
+    if image.reference != reference:
+        raise ValueError("INCONSISTENT_FEATURE_IMAGE_REFERENCE")
+    display_width, display_height = _display_dimensions(image)
     return {
         "root_role": reference.root_role.value,
         "relative_path": reference.relative_path,
+        "display_width": display_width,
+        "display_height": display_height,
     }
 
 
-def _serialize_crop_result(result: CropMatchResult) -> dict[str, object]:
+def _display_dimensions(image: FeatureImage) -> tuple[int | None, int | None]:
+    if type(image.width) is not int or type(image.height) is not int:
+        raise ValueError("INVALID_DISPLAY_DIMENSION_TYPE")
+    if image.width > 0 and image.height > 0:
+        return image.width, image.height
+    if image.width == 0 and image.height == 0:
+        return None, None
+    raise ValueError("INCONSISTENT_DISPLAY_DIMENSIONS")
+
+
+def _serialize_crop_result(
+    result: CropMatchResult,
+    crop_images: dict[SemanticReference, FeatureImage],
+    original_images: dict[SemanticReference, FeatureImage],
+) -> dict[str, object]:
     best = result.ranked_candidates[0] if result.ranked_candidates else None
     second = next(
         (
@@ -251,14 +306,15 @@ def _serialize_crop_result(result: CropMatchResult) -> dict[str, object]:
         ),
         None,
     )
+    crop_image = _require_feature_image(result.crop, crop_images)
     return {
-        "crop": _serialize_reference(result.crop),
+        "crop": _serialize_reference(result.crop, crop_image),
         "decision": result.decision.value,
         "provenance_interpretation": result.provenance_interpretation.value,
         "diagnostic_reason": result.diagnostic_reason,
         "best_vs_second_margins": _serialize_margins(best, second),
         "ranked_candidates": [
-            _serialize_candidate(rank, candidate)
+            _serialize_candidate(rank, candidate, original_images)
             for rank, candidate in enumerate(result.ranked_candidates, start=1)
         ],
     }
@@ -285,10 +341,15 @@ def _difference(first: float | None, second: float | None) -> float | None:
     return None if first is None or second is None else first - second
 
 
-def _serialize_candidate(rank: int, candidate: CandidateEvidence) -> dict[str, object]:
+def _serialize_candidate(
+    rank: int,
+    candidate: CandidateEvidence,
+    original_images: dict[SemanticReference, FeatureImage],
+) -> dict[str, object]:
+    original_image = _require_feature_image(candidate.original, original_images)
     return {
         "rank": rank,
-        "original": _serialize_reference(candidate.original),
+        "original": _serialize_reference(candidate.original, original_image),
         "descriptor_evidence": {
             "crop_keypoints": candidate.crop_keypoints,
             "original_keypoints": candidate.original_keypoints,

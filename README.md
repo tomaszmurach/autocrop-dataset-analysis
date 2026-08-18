@@ -97,6 +97,10 @@ roots, and existing output is never replaced. Source images are decoded
 read-only and are never normalized or rewritten. Normal console output contains
 aggregate counts only.
 
+Content-provenance schema `1.1` records each crop's and candidate original's
+EXIF-normalized display dimensions for downstream geometry consumers. Crop
+reconstruction is still not implemented.
+
 The external decisions mean:
 
 - `MATCHED` / `UNIQUE_STRONG_PROVENANCE`: one candidate passes every
