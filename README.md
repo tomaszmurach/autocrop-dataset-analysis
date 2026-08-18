@@ -24,6 +24,10 @@ dataset audit
 Dataset audit and conservative pair discovery are implemented. Crop
 reconstruction, statistical analysis, and optimization are not implemented.
 
+An isolated content-pairing feasibility experiment is also available. It is
+not part of the deterministic filename/stem pairing pipeline and is not
+production-proven.
+
 ## Dataset audit and pair discovery
 
 The command recursively inventories two explicit roots, inspects image metadata
@@ -66,6 +70,57 @@ when both files are readable and have the required core dimensions. Pillow may
 not decode RAW, HEIC/HEIF, AVIF, or other formats in a particular installation;
 such image-like files remain visible as unsupported findings.
 
+## Experimental exact-frame content provenance
+
+The experimental command tests whether a manually cropped, resized, and
+recompressed image has uniquely strong evidence of derivation from one exact
+source frame. It applies EXIF normalization in memory, SIFT feature extraction,
+exact descriptor matching, similarity-transform RANSAC verification, and
+aligned luminance/gradient comparison.
+
+Originals retain at most 3,000 SIFT features during a run; their decoded
+full-resolution pixels are released after feature extraction. An original is
+opened read-only again only when plausible geometry requires aligned
+photometric verification. Crops remain cached because the feasibility sample
+contains few, comparatively small crop images.
+
+```powershell
+python -m autocrop_analysis.content_match_cli `
+  --originals C:\path\to\candidate-originals `
+  --cropped C:\path\to\manual-crops `
+  --output C:\private-output\content-results.private.json
+```
+
+All paths are explicit. Input roots must be distinct and non-nested. The
+private JSON parent must already exist, the result must be outside both input
+roots, and existing output is never replaced. Source images are decoded
+read-only and are never normalized or rewritten. Normal console output contains
+aggregate counts only.
+
+The external decisions mean:
+
+- `MATCHED` / `UNIQUE_STRONG_PROVENANCE`: one candidate passes every
+  descriptor, geometry, coverage, transform, photometric, and runner-up
+  separation requirement;
+- `AMBIGUOUS` / `AMBIGUOUS_PROVENANCE`: multiple candidates remain credible or
+  observationally indistinguishable inside the crop;
+- `NO_MATCH` / `NO_VALID_PROVENANCE`: no supplied source has adequate,
+  internally consistent provenance evidence.
+
+Unique provenance is permitted only when every supplied original image
+candidate was evaluable. An audit-unavailable, feature-extraction-unavailable,
+or lazy photometric-decode-unavailable original makes the candidate set
+incomplete, forcing every crop to `AMBIGUOUS` with the diagnostic
+`INCOMPLETE_CANDIDATE_SET`. Aggregate completeness counts are stored in the
+private result and printed without filenames.
+
+Real private samples are treated as unlabeled provenance discovery. A
+`MATCHED` result is an experimental evidence-based prediction, not ground
+truth, and the command does not report accuracy. Correctness and provisional
+thresholds are exercised using deterministic labeled synthetic tests. The
+current command exhaustively compares small candidate sets; retrieval or other
+scaling for 1,074 × 9,999 images is not implemented.
+
 ## Development
 
 Python 3.13 or newer is required.
@@ -76,5 +131,6 @@ py -3.13 -m venv .venv
 .venv\Scripts\python -m unittest discover -s tests -v
 ```
 
-Pillow is the sole runtime dependency. Tests use Python's standard-library
-`unittest` framework and create synthetic images only in temporary directories.
+Runtime dependencies are Pillow, NumPy, and headless OpenCV. Tests use Python's
+standard-library `unittest` framework and create synthetic images only in
+temporary directories.
