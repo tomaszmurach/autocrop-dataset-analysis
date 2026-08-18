@@ -9,9 +9,10 @@ description = "Developer-side tools for auditing and analyzing AutoCrop datasets
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "numpy>=2.0",
+    "opencv-python-headless>=4.13,<6",
     "Pillow>=11.0",
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
