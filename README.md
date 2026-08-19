@@ -175,6 +175,57 @@ python -m autocrop_analysis.candidate_retrieval_benchmark `
   --k-values 1,5,10,20,50,100
 ```
 
+### Exact-retrieval baseline profiling
+
+Candidate-retrieval profiling is opt-in research instrumentation for measuring
+the existing exact BF-L2 reference backend. It does not change retrieval or
+provenance semantics, and profiling data is never added to the persistent index
+or retrieval-result schemas. Supply a separate no-clobber private JSON output
+when building or querying:
+
+```powershell
+python -m autocrop_analysis.candidate_retrieval_cli build `
+  --originals C:\path\to\candidate-originals `
+  --output C:\private-output\candidate-index.private.json `
+  --profile-output C:\private-output\candidate-index-profile.private.json
+
+python -m autocrop_analysis.candidate_retrieval_cli query `
+  --index C:\private-output\candidate-index.private.json `
+  --cropped C:\path\to\manual-crops `
+  --output C:\private-output\retrieval.private.json `
+  --profile-output C:\private-output\retrieval-profile.private.json `
+  --k 50
+```
+
+Build profiling separates corpus audit, the first encoded-file hash, combined
+feature extraction, the second stability hash, compact selection, descriptor
+writing with incremental hashing, manifest/corpus-identity construction, and
+publication. Feature extraction intentionally remains one stage containing
+decode, EXIF normalization, grayscale conversion, SIFT, and stable feature
+ordering because the baseline extractor performs those operations together.
+
+Query profiling separates index-manifest loading/validation, the required
+descriptor-binary integrity hash, memmap creation, crop audit, combined query
+feature extraction, compact selection, exact BF search, Python vote
+aggregation/ranking, shortlist construction, result-manifest construction, and
+output publication. It labels the first query and subsequent queries while one
+loaded index is shared by the batch. The descriptor work-unit count is selected
+query rows multiplied by indexed rows; it is a normalization value, not a CPU
+instruction count.
+
+Timings use `time.perf_counter_ns()`. Filesystem page-cache state is uncontrolled:
+a normal CLI invocation labels its load `process_fresh_load`, not a guaranteed
+cold-disk measurement. The in-process synthetic benchmark labels its load
+`same_process_after_build`. On Windows, memory snapshots report current and lifetime-peak
+process working set through PSAPI. Other platforms report standard-library
+process metrics where available and use explicit null values otherwise; Python
+heap usage is never mislabeled as process RSS.
+
+The synthetic benchmark includes the same profiling report in its console JSON.
+Tiny or bounded runs are measurements of those runs only and must not be treated
+as full-corpus performance predictions. Retrieval profiling measures candidate
+retrieval cost; it says nothing about provenance correctness.
+
 Large progression benchmarks are operator-directed and are not part of the
 normal unit suite. Future real bounded checks must be described only as
 consistency with existing provenance predictions, not retrieval accuracy or

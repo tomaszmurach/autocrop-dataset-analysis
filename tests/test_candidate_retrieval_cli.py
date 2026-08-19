@@ -16,7 +16,15 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 
 from autocrop_analysis import candidate_retrieval_cli
-from autocrop_analysis.candidate_retrieval import QueryStatus
+from autocrop_analysis.candidate_retrieval import IndexParameters, QueryParameters, QueryStatus
+from autocrop_analysis.candidate_retrieval_profiling import (
+    ProcessMemoryReading,
+    RetrievalProfiler,
+)
+
+
+def unavailable_memory() -> ProcessMemoryReading:
+    return ProcessMemoryReading("unavailable", None, None)
 
 
 def structured_image(seed: int, size: tuple[int, int] = (420, 320)) -> Image.Image:
@@ -156,6 +164,135 @@ class CandidateRetrievalCliTests(unittest.TestCase):
         second_manifest["binary"]["filename"] = "normalized"
         self.assertEqual(first_manifest, second_manifest)
 
+    def test_profiled_build_is_identical_and_does_not_add_hash_passes(self) -> None:
+        self.create_retrieval_dataset()
+        plain_path = self.index("plain.private.json")
+        profiled_path = self.index("profiled.private.json")
+        parameters = IndexParameters(original_max_descriptors=64)
+
+        with mock.patch(
+            "autocrop_analysis.candidate_retrieval_cli.hash_file",
+            wraps=candidate_retrieval_cli.hash_file,
+        ) as plain_hash:
+            plain_manifest = candidate_retrieval_cli.build_index(
+                candidate_retrieval_cli.validate_build_paths(
+                    self.originals, plain_path
+                ),
+                parameters,
+            )
+        profiler = RetrievalProfiler(memory_reader=unavailable_memory)
+        with mock.patch(
+            "autocrop_analysis.candidate_retrieval_cli.hash_file",
+            wraps=candidate_retrieval_cli.hash_file,
+        ) as profiled_hash:
+            profiled_manifest = candidate_retrieval_cli.build_index(
+                candidate_retrieval_cli.validate_build_paths(
+                    self.originals, profiled_path
+                ),
+                parameters,
+                profiler=profiler,
+            )
+
+        plain_binary = candidate_retrieval_cli.descriptor_path_for_manifest(
+            plain_path
+        )
+        profiled_binary = candidate_retrieval_cli.descriptor_path_for_manifest(
+            profiled_path
+        )
+        self.assertEqual(plain_hash.call_count, profiled_hash.call_count)
+        self.assertEqual(plain_hash.call_count, 6)
+        self.assertEqual(plain_binary.read_bytes(), profiled_binary.read_bytes())
+        plain_manifest["binary"]["filename"] = "normalized"
+        profiled_manifest["binary"]["filename"] = "normalized"
+        self.assertEqual(plain_manifest, profiled_manifest)
+        self.assertEqual(
+            plain_manifest["corpus"]["identity_sha256"],
+            profiled_manifest["corpus"]["identity_sha256"],
+        )
+        stages = {stage["stage"] for stage in profiler.as_report()["stages"]}
+        self.assertIn("build.first_encoded_hash", stages)
+        self.assertIn("build.second_stability_hash", stages)
+        self.assertIn("build.descriptor_write_and_hash", stages)
+
+    def test_profiled_load_and_batch_query_are_semantically_identical(self) -> None:
+        self.create_retrieval_dataset()
+        self.assertEqual(
+            candidate_retrieval_cli.main(
+                self.build_args(), stdout=StringIO(), stderr=StringIO()
+            ),
+            0,
+        )
+        plain_paths = candidate_retrieval_cli.validate_query_paths(
+            self.index(), self.cropped, self.retrieval("plain.private.json")
+        )
+        profiled_paths = candidate_retrieval_cli.validate_query_paths(
+            self.index(), self.cropped, self.retrieval("profiled.private.json")
+        )
+        parameters = QueryParameters(
+            query_max_descriptors=48, neighbor_depth=32, requested_k=2
+        )
+
+        with mock.patch(
+            "autocrop_analysis.candidate_retrieval_cli.hash_file",
+            wraps=candidate_retrieval_cli.hash_file,
+        ) as plain_hash:
+            plain_loaded = candidate_retrieval_cli.load_index(plain_paths)
+        profiler = RetrievalProfiler(memory_reader=unavailable_memory)
+        with mock.patch(
+            "autocrop_analysis.candidate_retrieval_cli.hash_file",
+            wraps=candidate_retrieval_cli.hash_file,
+        ) as profiled_hash:
+            profiled_loaded = candidate_retrieval_cli.load_index(
+                profiled_paths, profiler=profiler
+            )
+        self.assertEqual(plain_hash.call_count, profiled_hash.call_count)
+        self.assertEqual(plain_hash.call_count, 1)
+
+        with mock.patch(
+            "autocrop_analysis.candidate_retrieval_cli.extract_features",
+            wraps=candidate_retrieval_cli.extract_features,
+        ) as plain_extract:
+            plain_manifest, plain_results = candidate_retrieval_cli.query_index(
+                plain_paths, plain_loaded, parameters
+            )
+        with mock.patch(
+            "autocrop_analysis.candidate_retrieval_cli.extract_features",
+            wraps=candidate_retrieval_cli.extract_features,
+        ) as profiled_extract:
+            profiled_manifest, profiled_results = candidate_retrieval_cli.query_index(
+                profiled_paths,
+                profiled_loaded,
+                parameters,
+                profiler=profiler,
+            )
+
+        self.assertEqual(plain_extract.call_count, profiled_extract.call_count)
+        self.assertEqual(plain_extract.call_count, 3)
+        self.assertEqual(profiled_manifest, plain_manifest)
+        self.assertEqual(profiled_results, plain_results)
+        stages = profiler.as_report()["stages"]
+        self.assertTrue(
+            any(
+                stage["stage"] == "query.total"
+                and stage.get("phase") == "first_query"
+                for stage in stages
+            )
+        )
+        self.assertTrue(
+            any(
+                stage["stage"] == "query.total"
+                and stage.get("phase") == "subsequent_query"
+                for stage in stages
+            )
+        )
+        self.assertIn(
+            "query.exact_bf_search", {stage["stage"] for stage in stages}
+        )
+        if isinstance(plain_loaded.descriptors, np.memmap):
+            plain_loaded.descriptors._mmap.close()
+        if isinstance(profiled_loaded.descriptors, np.memmap):
+            profiled_loaded.descriptors._mmap.close()
+
     def test_no_descriptor_original_marks_index_incomplete(self) -> None:
         structured_image(1).save(self.originals / "source.png")
         Image.new("RGB", (200, 150), (90, 90, 90)).save(self.originals / "blank.png")
@@ -197,6 +334,33 @@ class CandidateRetrievalCliTests(unittest.TestCase):
         self.assertEqual(result["query_status"], QueryStatus.NO_QUERY_DESCRIPTORS.value)
         self.assertEqual(result["ranked_candidates"], [])
 
+    def test_profiled_zero_descriptor_query_records_preparation_without_search(self) -> None:
+        structured_image(1).save(self.originals / "source.png")
+        Image.new("RGB", (200, 150), (90, 90, 90)).save(
+            self.cropped / "blank.png"
+        )
+        profile = self.results / "zero-query-profile.private.json"
+        self.assertEqual(
+            candidate_retrieval_cli.main(
+                self.build_args(), stdout=StringIO(), stderr=StringIO()
+            ),
+            0,
+        )
+        self.assertEqual(
+            candidate_retrieval_cli.main(
+                [*self.query_args(), "--profile-output", str(profile)],
+                stdout=StringIO(),
+                stderr=StringIO(),
+            ),
+            0,
+        )
+        report = json.loads(profile.read_text(encoding="utf-8"))
+        stages = {stage["stage"] for stage in report["stages"]}
+        self.assertIn("query.feature_extraction", stages)
+        self.assertIn("query.compact_descriptor_selection", stages)
+        self.assertIn("query.total", stages)
+        self.assertNotIn("query.exact_bf_search", stages)
+
     def test_query_refuses_existing_output_without_modification(self) -> None:
         source = structured_image(1)
         source.save(self.originals / "source.png")
@@ -205,6 +369,105 @@ class CandidateRetrievalCliTests(unittest.TestCase):
         self.retrieval().write_bytes(b"existing")
         self.assertEqual(candidate_retrieval_cli.main(self.query_args(), stdout=StringIO(), stderr=StringIO()), 2)
         self.assertEqual(self.retrieval().read_bytes(), b"existing")
+
+    def test_opt_in_profile_reports_are_out_of_band(self) -> None:
+        self.create_retrieval_dataset()
+        build_profile = self.results / "build-profile.private.json"
+        query_profile = self.results / "query-profile.private.json"
+        self.assertEqual(
+            candidate_retrieval_cli.main(
+                [*self.build_args(), "--profile-output", str(build_profile)],
+                stdout=StringIO(),
+                stderr=StringIO(),
+            ),
+            0,
+        )
+        self.assertEqual(
+            candidate_retrieval_cli.main(
+                [*self.query_args(), "--profile-output", str(query_profile)],
+                stdout=StringIO(),
+                stderr=StringIO(),
+            ),
+            0,
+        )
+
+        index_manifest = json.loads(self.index().read_text(encoding="utf-8"))
+        retrieval_manifest = json.loads(
+            self.retrieval().read_text(encoding="utf-8")
+        )
+        build_report = json.loads(build_profile.read_text(encoding="utf-8"))
+        query_report = json.loads(query_profile.read_text(encoding="utf-8"))
+        self.assertNotIn("profiling", index_manifest)
+        self.assertNotIn("profiling", retrieval_manifest)
+        self.assertEqual(build_report["schema_version"], "1.0")
+        self.assertEqual(
+            build_report["semantics"],
+            "RESEARCH_ONLY_EXACT_BF_BASELINE_PROFILING",
+        )
+        self.assertIn(
+            "build.total", {stage["stage"] for stage in build_report["stages"]}
+        )
+        query_stages = {stage["stage"] for stage in query_report["stages"]}
+        self.assertIn("load.total", query_stages)
+        self.assertIn("query.shared_index_batch_total", query_stages)
+        self.assertIn("query.output_publication", query_stages)
+        profile_text = build_profile.read_text(encoding="utf-8") + query_profile.read_text(
+            encoding="utf-8"
+        )
+        for private_value in (
+            "private-source.png",
+            "private-resized.jpg",
+            str(self.originals),
+            str(self.cropped),
+        ):
+            self.assertNotIn(private_value, profile_text)
+
+    def test_existing_profile_output_stops_before_creating_index(self) -> None:
+        structured_image(1).save(self.originals / "source.png")
+        profile = self.results / "existing-profile.private.json"
+        profile.write_bytes(b"existing")
+        output = self.index("new-index.private.json")
+        stderr = StringIO()
+        self.assertEqual(
+            candidate_retrieval_cli.main(
+                [
+                    *self.build_args(output),
+                    "--profile-output",
+                    str(profile),
+                ],
+                stdout=StringIO(),
+                stderr=stderr,
+            ),
+            2,
+        )
+        self.assertFalse(output.exists())
+        self.assertFalse(
+            candidate_retrieval_cli.descriptor_path_for_manifest(output).exists()
+        )
+        self.assertEqual(profile.read_bytes(), b"existing")
+
+    def test_profile_output_requires_private_suffix_and_safe_location(self) -> None:
+        structured_image(1).save(self.originals / "source.png")
+        cases = (
+            self.results / "profile.json",
+            self.originals / "profile.private.json",
+        )
+        for index, profile in enumerate(cases):
+            with self.subTest(profile=profile):
+                output = self.index(f"index-{index}.private.json")
+                self.assertEqual(
+                    candidate_retrieval_cli.main(
+                        [
+                            *self.build_args(output),
+                            "--profile-output",
+                            str(profile),
+                        ],
+                        stdout=StringIO(),
+                        stderr=StringIO(),
+                    ),
+                    2,
+                )
+                self.assertFalse(output.exists())
 
     def test_binary_hash_mismatch_is_rejected_with_sanitized_error(self) -> None:
         self.create_retrieval_dataset()

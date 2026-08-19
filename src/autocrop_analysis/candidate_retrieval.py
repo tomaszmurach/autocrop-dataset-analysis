@@ -23,6 +23,7 @@ import PIL
 
 from . import __version__
 from .audit import RootRole, SemanticReference, semantic_reference_sort_key
+from .candidate_retrieval_profiling import RetrievalProfiler, profiling_stage
 from .content_matching import FeatureImage
 
 
@@ -273,6 +274,9 @@ def retrieve_candidates(
     descriptor_matrix: np.ndarray,
     originals: Sequence[OriginalIndexRecord],
     parameters: QueryParameters,
+    *,
+    profiler: RetrievalProfiler | None = None,
+    item_ordinal: int | None = None,
 ) -> tuple[RetrievalCandidate, ...]:
     """Run exact blockwise pooled BF-L2 search and per-original voting."""
 
@@ -294,43 +298,65 @@ def retrieve_candidates(
         raise ValueError("INVALID_INDEX_DESCRIPTOR_RANGES")
 
     nearest: list[list[tuple[float, int]]] = [[] for _ in range(query.shape[0])]
-    matcher = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
-    for block_start in range(0, matrix.shape[0], parameters.descriptor_block_rows):
-        block_end = min(matrix.shape[0], block_start + parameters.descriptor_block_rows)
-        block = np.ascontiguousarray(matrix[block_start:block_end], dtype=np.float32)
-        depth = min(parameters.neighbor_depth, block.shape[0])
-        rows = matcher.knnMatch(query, block, k=depth)
-        for query_index, matches in enumerate(rows):
-            combined = nearest[query_index]
-            combined.extend(
-                (float(match.distance), block_start + int(match.trainIdx))
-                for match in matches
+    with profiling_stage(
+        profiler, "query.exact_bf_search", item_ordinal=item_ordinal
+    ) as search_timing:
+        if profiler is not None:
+            search_timing.add_work(
+                selected_query_descriptor_rows=int(query.shape[0]),
+                indexed_descriptor_rows=int(matrix.shape[0]),
+                descriptor_distance_work_units=int(query.shape[0] * matrix.shape[0]),
+                descriptor_blocks=math.ceil(
+                    matrix.shape[0] / parameters.descriptor_block_rows
+                ),
             )
-            combined.sort(key=lambda item: (item[0], item[1]))
-            del combined[parameters.neighbor_depth :]
+        matcher = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
+        for block_start in range(0, matrix.shape[0], parameters.descriptor_block_rows):
+            block_end = min(matrix.shape[0], block_start + parameters.descriptor_block_rows)
+            block = np.ascontiguousarray(matrix[block_start:block_end], dtype=np.float32)
+            depth = min(parameters.neighbor_depth, block.shape[0])
+            rows = matcher.knnMatch(query, block, k=depth)
+            for query_index, matches in enumerate(rows):
+                combined = nearest[query_index]
+                combined.extend(
+                    (float(match.distance), block_start + int(match.trainIdx))
+                    for match in matches
+                )
+                combined.sort(key=lambda item: (item[0], item[1]))
+                del combined[parameters.neighbor_depth :]
 
-    support: dict[int, list[float]] = defaultdict(list)
-    for matches in nearest:
-        best_by_owner: dict[int, float] = {}
-        for distance, row_index in matches:
-            owner = int(np.searchsorted(range_ends, row_index, side="right"))
-            previous = best_by_owner.get(owner)
-            if previous is None or distance < previous:
-                best_by_owner[owner] = distance
-        for owner, distance in best_by_owner.items():
-            support[owner].append(distance)
+    with profiling_stage(
+        profiler, "query.vote_aggregation_ranking", item_ordinal=item_ordinal
+    ) as ranking_timing:
+        support: dict[int, list[float]] = defaultdict(list)
+        for matches in nearest:
+            best_by_owner: dict[int, float] = {}
+            for distance, row_index in matches:
+                owner = int(np.searchsorted(range_ends, row_index, side="right"))
+                previous = best_by_owner.get(owner)
+                if previous is None or distance < previous:
+                    best_by_owner[owner] = distance
+            for owner, distance in best_by_owner.items():
+                support[owner].append(distance)
 
-    candidates = [
-        RetrievalCandidate(
-            original=indexed[owner].reference,
-            supporting_query_descriptors=len(distances),
-            median_best_l2_distance=float(median(distances)),
-            mean_best_l2_distance=float(mean(distances)),
-        )
-        for owner, distances in support.items()
-        if distances
-    ]
-    return tuple(sorted(candidates, key=retrieval_candidate_sort_key))
+        candidates = [
+            RetrievalCandidate(
+                original=indexed[owner].reference,
+                supporting_query_descriptors=len(distances),
+                median_best_l2_distance=float(median(distances)),
+                mean_best_l2_distance=float(mean(distances)),
+            )
+            for owner, distances in support.items()
+            if distances
+        ]
+        ranked = tuple(sorted(candidates, key=retrieval_candidate_sort_key))
+        if profiler is not None:
+            ranking_timing.add_work(
+                selected_query_descriptor_rows=int(query.shape[0]),
+                nearest_descriptor_matches=sum(len(matches) for matches in nearest),
+                ranked_originals=len(ranked),
+            )
+        return ranked
 
 
 def retrieval_candidate_sort_key(candidate: RetrievalCandidate) -> tuple[object, ...]:
@@ -722,6 +748,8 @@ def make_query_result(
     metadata: IndexMetadata,
     descriptor_matrix: np.ndarray,
     parameters: QueryParameters,
+    profiler: RetrievalProfiler | None = None,
+    item_ordinal: int | None = None,
 ) -> RetrievalQueryResult:
     if crop.descriptors is None or crop.diagnostic_reason is not None:
         status = (
@@ -743,8 +771,24 @@ def make_query_result(
             None,
             (),
         )
-    ranked = retrieve_candidates(compact_descriptors, descriptor_matrix, metadata.originals, parameters)
-    shortlist, extension, boundary = select_shortlist(ranked, parameters.requested_k)
+    ranked = retrieve_candidates(
+        compact_descriptors,
+        descriptor_matrix,
+        metadata.originals,
+        parameters,
+        profiler=profiler,
+        item_ordinal=item_ordinal,
+    )
+    with profiling_stage(
+        profiler, "query.shortlist_construction", item_ordinal=item_ordinal
+    ) as shortlist_timing:
+        shortlist, extension, boundary = select_shortlist(ranked, parameters.requested_k)
+        if profiler is not None:
+            shortlist_timing.add_work(
+                ranked_originals=len(ranked),
+                returned_candidates=len(shortlist),
+                tie_extension_count=extension,
+            )
     status = QueryStatus.RETRIEVED if metadata.index_corpus_complete else QueryStatus.INDEX_INCOMPLETE
     return RetrievalQueryResult(
         crop.reference,

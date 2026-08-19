@@ -7,7 +7,6 @@ from collections import Counter, defaultdict
 import json
 from pathlib import Path
 import tempfile
-from time import perf_counter
 from typing import Sequence
 
 import numpy as np
@@ -15,18 +14,18 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 
 from .audit import RootRole, SemanticReference
 from .candidate_retrieval import (
+    IndexParameters,
     QueryParameters,
     recall_at_k,
-    select_spatially_balanced_descriptors,
 )
 from .candidate_retrieval_cli import (
     build_index,
     load_index,
+    query_index,
     validate_build_paths,
     validate_query_paths,
 )
-from .candidate_retrieval import IndexParameters, make_query_result
-from .content_matching import MatchingParameters, configure_opencv, extract_features
+from .candidate_retrieval_profiling import RetrievalProfiler
 
 
 DEFAULT_STRATA = ("resize", "jpeg", "luminance", "blur_noise", "exif")
@@ -133,11 +132,11 @@ def run_benchmark(arguments: argparse.Namespace) -> dict[str, object]:
             sources.append(image)
 
         truth: dict[str, tuple[SemanticReference, str]] = {}
-        for query_index in range(query_count):
-            source_index = query_index % corpus_size
-            stratum = strata[query_index % len(strata)]
+        for query_number in range(query_count):
+            source_index = query_number % corpus_size
+            stratum = strata[query_number % len(strata)]
             suffix = ".jpg" if stratum in {"jpeg", "exif"} else ".png"
-            filename = f"query-{query_index:05d}-{stratum}{suffix}"
+            filename = f"query-{query_number:05d}-{stratum}{suffix}"
             _save_query(sources[source_index], crops / filename, stratum, rng)
             truth[filename] = (
                 SemanticReference(RootRole.ORIGINAL, f"source-{source_index:05d}.png"),
@@ -150,53 +149,39 @@ def run_benchmark(arguments: argparse.Namespace) -> dict[str, object]:
             original_max_descriptors=arguments.original_max_descriptors,
             random_seed=arguments.seed,
         )
-        started = perf_counter()
-        index_manifest = build_index(build_paths, index_parameters)
-        build_seconds = perf_counter() - started
+        profiler = RetrievalProfiler()
+        index_manifest = build_index(
+            build_paths, index_parameters, profiler=profiler
+        )
 
         query_paths = validate_query_paths(
             index_path, crops, results / "unused-retrieval.private.json"
         )
-        loaded = load_index(query_paths)
+        loaded = load_index(
+            query_paths,
+            profiler=profiler,
+            load_context="same_process_after_build",
+        )
         query_parameters = QueryParameters(
             query_max_descriptors=arguments.query_max_descriptors,
             neighbor_depth=arguments.neighbor_depth,
             requested_k=max(k_values),
         )
-        matching_parameters = MatchingParameters(
-            sift_nfeatures=loaded.metadata.parameters.sift_nfeatures,
-            random_seed=loaded.metadata.parameters.random_seed,
+        _, query_results = query_index(
+            query_paths, loaded, query_parameters, profiler=profiler
         )
-        configure_opencv(matching_parameters)
         cases = []
-        query_times: list[float] = []
+        query_times = [
+            measurement.elapsed_ns / 1_000_000_000
+            for measurement in profiler.measurements
+            if measurement.stage == "query.total"
+        ]
         ranks: list[int | None] = []
         returned_sizes: list[int] = []
         tie_extensions: list[int] = []
         by_stratum: dict[str, list[tuple[SemanticReference, tuple]]] = defaultdict(list)
-        for path in sorted(crops.iterdir(), key=lambda item: item.name):
-            source, stratum = truth[path.name]
-            started = perf_counter()
-            feature = extract_features(
-                path,
-                SemanticReference(RootRole.CROPPED, path.name),
-                matching_parameters,
-                retain_grayscale=False,
-            )
-            compact = select_spatially_balanced_descriptors(
-                feature,
-                maximum=query_parameters.query_max_descriptors,
-                grid_rows=loaded.metadata.parameters.grid_rows,
-                grid_columns=loaded.metadata.parameters.grid_columns,
-            )
-            result = make_query_result(
-                crop=feature,
-                compact_descriptors=compact,
-                metadata=loaded.metadata,
-                descriptor_matrix=loaded.descriptors,
-                parameters=query_parameters,
-            )
-            query_times.append(perf_counter() - started)
+        for result in query_results:
+            source, stratum = truth[result.crop.relative_path]
             candidates = result.ranked_candidates
             cases.append((source, candidates))
             by_stratum[stratum].append((source, candidates))
@@ -216,6 +201,7 @@ def run_benchmark(arguments: argparse.Namespace) -> dict[str, object]:
         binary_path = build_paths.binary
         exact_shortlist_comparisons = sum(returned_sizes)
         exhaustive_comparisons = corpus_size * query_count
+        profiler.snapshot_memory("benchmark_final")
         report = {
             "benchmark_semantics": "SYNTHETIC_KNOWN_SOURCE_RETRIEVAL",
             "configuration": {
@@ -235,7 +221,16 @@ def run_benchmark(arguments: argparse.Namespace) -> dict[str, object]:
                 "ranks": dict(sorted(Counter(str(rank) if rank is not None else "MISS" for rank in ranks).items())),
             },
             "performance": {
-                "index_build_seconds": build_seconds,
+                "index_build_seconds": profiler.elapsed_ns("build.total")
+                / 1_000_000_000,
+                "index_load_seconds": profiler.elapsed_ns(
+                    "load.total", phase="same_process_after_build"
+                )
+                / 1_000_000_000,
+                "query_batch_processing_seconds": profiler.elapsed_ns(
+                    "query.batch_processing_total"
+                )
+                / 1_000_000_000,
                 "query_median_seconds": float(np.median(query_times)),
                 "query_p95_seconds": float(np.percentile(query_times, 95)),
                 "index_manifest_bytes": index_path.stat().st_size,
@@ -257,6 +252,7 @@ def run_benchmark(arguments: argparse.Namespace) -> dict[str, object]:
                 ),
             },
             "index_corpus_complete": index_manifest["summary"]["index_corpus_complete"],
+            "profiling": profiler.as_report(),
         }
         if isinstance(loaded.descriptors, np.memmap):
             loaded.descriptors._mmap.close()
