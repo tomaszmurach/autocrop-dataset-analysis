@@ -21,8 +21,9 @@ dataset audit
 → frozen evaluation
 ```
 
-Dataset audit and conservative pair discovery are implemented. Crop
-reconstruction, statistical analysis, and optimization are not implemented.
+Dataset audit, conservative pair discovery, and experimental manifest-based
+crop reconstruction are implemented. Statistical analysis and optimization are
+not implemented.
 
 An isolated content-pairing feasibility experiment is also available. It is
 not part of the deterministic filename/stem pairing pipeline and is not
@@ -99,7 +100,8 @@ aggregate counts only.
 
 Content-provenance schema `1.1` records each crop's and candidate original's
 EXIF-normalized display dimensions for downstream geometry consumers. Crop
-reconstruction is still not implemented.
+reconstruction consumes this private manifest without reopening either image
+tree.
 
 The external decisions mean:
 
@@ -124,6 +126,37 @@ truth, and the command does not report accuracy. Correctness and provisional
 thresholds are exercised using deterministic labeled synthetic tests. The
 current command exhaustively compares small candidate sets; retrieval or other
 scaling for 1,074 × 9,999 images is not implemented.
+
+## Experimental crop reconstruction
+
+Crop reconstruction converts a content-provenance schema `1.1` manifest into a
+separate private geometry manifest. It does not discover images, reopen source
+or crop files, or rerun content matching.
+
+```powershell
+python -m autocrop_analysis.crop_reconstruction_cli `
+  --provenance C:\private-output\content-results.private.json `
+  --output C:\private-output\crop-reconstruction.private.json
+```
+
+Both paths are required and must end with `.private.json`. The input must exist,
+the output parent must already exist, and an existing output is never replaced.
+Normal console output contains aggregate counts only.
+
+Reconstruction is attempted only for a complete candidate set and a
+`MATCHED` / `UNIQUE_STRONG_PROVENANCE` crop whose rank-1 evidence is complete,
+strong, geometrically valid, and plausible. `AMBIGUOUS` and `NO_MATCH` crops are
+preserved as `NOT_RECONSTRUCTED` and never receive selected geometry. A matched
+crop can also remain `NOT_RECONSTRUCTED` when its geometry is degenerate,
+inconsistent, more than the provisional reconstruction-only 1° from axis
+alignment, or outside the original display extent.
+
+Authoritative rectangles are floating-point `left`, `top`, `right`, `bottom`
+coordinates in `EXIF_NORMALIZED_DISPLAY_PIXEL_BOUNDARIES`, with half-open
+`[left, right) × [top, bottom)` semantics. They are derived from the base RANSAC
+projected corners; photometric refinement shifts remain scoring-only. The
+result is experimental provenance-derived geometry, not independently verified
+ground truth.
 
 ## Development
 
