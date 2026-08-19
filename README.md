@@ -124,8 +124,61 @@ Real private samples are treated as unlabeled provenance discovery. A
 `MATCHED` result is an experimental evidence-based prediction, not ground
 truth, and the command does not report accuracy. Correctness and provisional
 thresholds are exercised using deterministic labeled synthetic tests. The
-current command exhaustively compares small candidate sets; retrieval or other
-scaling for 1,074 × 9,999 images is not implemented.
+current command exhaustively compares small candidate sets; retrieval remains
+separate from its provenance decisions.
+
+## Experimental content candidate retrieval
+
+Candidate retrieval builds a persistent private index of spatially balanced,
+compact SIFT descriptors and uses exact pooled BF-L2 neighbor voting to return
+ranked source-original shortlists. It performs no mutual matching, geometry,
+RANSAC, image alignment, or photometric verification.
+
+Build the original-corpus index once:
+
+```powershell
+python -m autocrop_analysis.candidate_retrieval_cli build `
+  --originals C:\path\to\candidate-originals `
+  --output C:\private-output\candidate-index.private.json
+```
+
+The JSON index manifest is published beside a raw little-endian float32
+`*.descriptors.private.f32` matrix. Both files contain private client-derived
+data and must remain outside Git. The manifest binds every semantic original
+reference to its encoded-file SHA-256, display dimensions, representation
+status, and contiguous descriptor range. The descriptor file is size- and
+SHA-256-validated before use.
+
+Query the immutable index with explicit cropped-image input:
+
+```powershell
+python -m autocrop_analysis.candidate_retrieval_cli query `
+  --index C:\private-output\candidate-index.private.json `
+  --cropped C:\path\to\manual-crops `
+  --output C:\private-output\retrieval.private.json `
+  --k 50
+```
+
+Retrieval output contains vote counts and L2-distance diagnostics, not
+`MATCHED`, `AMBIGUOUS`, or `NO_MATCH` provenance decisions. Retrieval index
+completeness and query completeness are separate from the exact verifier's
+`candidate_set_complete` contract. The exhaustive exact verifier remains
+unchanged and no shortlist integration is implemented.
+
+The configurable synthetic benchmark uses known constructed sources and may
+therefore report Recall@K:
+
+```powershell
+python -m autocrop_analysis.candidate_retrieval_benchmark `
+  --corpus-size 32 `
+  --queries 20 `
+  --k-values 1,5,10,20,50,100
+```
+
+Large progression benchmarks are operator-directed and are not part of the
+normal unit suite. Future real bounded checks must be described only as
+consistency with existing provenance predictions, not retrieval accuracy or
+ground truth.
 
 ## Experimental crop reconstruction
 

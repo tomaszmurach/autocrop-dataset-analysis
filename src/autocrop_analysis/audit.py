@@ -187,6 +187,20 @@ def pillow_registered_extensions() -> dict[str, str]:
 def audit_datasets(originals_root: Path, cropped_root: Path) -> AuditResult:
     """Audit two already validated roots without modifying their contents."""
 
+    return _audit_roots(
+        ((RootRole.ORIGINAL, originals_root), (RootRole.CROPPED, cropped_root))
+    )
+
+
+def audit_root(root: Path, role: RootRole) -> AuditResult:
+    """Audit one already validated root with the standard traversal semantics."""
+
+    return _audit_roots(((role, root),))
+
+
+def _audit_roots(roots: Iterable[tuple[RootRole, Path]]) -> AuditResult:
+    """Shared deterministic implementation for one- and two-root auditing."""
+
     registered_extensions = pillow_registered_extensions()
     candidate_extensions = KNOWN_IMAGE_EXTENSIONS | registered_extensions.keys()
 
@@ -194,10 +208,7 @@ def audit_datasets(originals_root: Path, cropped_root: Path) -> AuditResult:
     all_issues: list[ScanIssue] = []
     all_physical_members: dict[tuple[int, int], list[SemanticReference]] = defaultdict(list)
 
-    for role, root in (
-        (RootRole.ORIGINAL, originals_root),
-        (RootRole.CROPPED, cropped_root),
-    ):
+    for role, root in roots:
         items, issues, physical_members = _scan_root(
             root,
             role,

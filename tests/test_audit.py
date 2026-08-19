@@ -20,6 +20,7 @@ from autocrop_analysis.audit import (
     RootRole,
     ScanIssueCategory,
     audit_datasets,
+    audit_root,
     build_identity_collisions,
     build_role_summary,
     pillow_registered_extensions,
@@ -60,6 +61,24 @@ class AuditTests(unittest.TestCase):
         result = self.audit()
         self.assertEqual(result.items, ())
         self.assertEqual(result.scan_issues, ())
+
+    def test_single_root_audit_preserves_standard_original_semantics(self) -> None:
+        save_image(self.originals / "source.png", format_name="PNG")
+        save_image(self.cropped / "crop.png", format_name="PNG")
+
+        combined = self.audit()
+        single = audit_root(self.originals, RootRole.ORIGINAL)
+
+        self.assertEqual(
+            single.items,
+            tuple(
+                item
+                for item in combined.items
+                if item.root_role is RootRole.ORIGINAL
+            ),
+        )
+        self.assertEqual(single.scan_issues, ())
+        self.assertEqual(single.registered_extensions, combined.registered_extensions)
 
     def test_valid_nested_hidden_and_case_normalized_files(self) -> None:
         nested = self.originals / "Nested"

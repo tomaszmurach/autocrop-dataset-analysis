@@ -52,6 +52,7 @@ pair_manifest*.jsonl
 *.private.csv
 *.private.json
 *.private.jsonl
+*.descriptors.private.f32
 
 # Local configuration and secrets
 .env
@@ -90,4 +91,3 @@ Thumbs.db
 *.swp
 *.swo
 *~
-
