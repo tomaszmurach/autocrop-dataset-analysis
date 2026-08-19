@@ -231,6 +231,45 @@ normal unit suite. Future real bounded checks must be described only as
 consistency with existing provenance predictions, not retrieval accuracy or
 ground truth.
 
+### Descriptor-only exact-BF scale characterization
+
+The operator-directed scale benchmark isolates the unchanged exact compact-SIFT
+BF-L2 retrieval oracle from image creation, decode, EXIF handling, grayscale
+conversion, and SIFT extraction. It generates deterministic synthetic float32
+descriptors in bounded chunks, reopens each temporary descriptor file as a
+read-only memmap, and measures every scale in a fresh worker process. Temporary
+descriptor data is removed after each worker completes and is never published
+with the JSON report.
+
+Run the approved progression through the intended 9,999-original scale:
+
+```powershell
+python -m autocrop_analysis.candidate_retrieval_scale_benchmark `
+  --max-descriptor-rows 1279872 `
+  --output C:\path\to\existing-directory\exact-bf-scale-report.json
+```
+
+For an intermediate operator run that stops at 262,144 rows and includes the
+bounded query-row and neighbor-depth sensitivity diagnostics:
+
+```powershell
+python -m autocrop_analysis.candidate_retrieval_scale_benchmark `
+  --max-descriptor-rows 262144 `
+  --include-sensitivity `
+  --output C:\path\to\existing-directory\exact-bf-scale-262144-report.json
+```
+
+The default ladder uses 64 query descriptors, neighbor depth 32, K=50, and
+65,536-row BF blocks. Each scale records one `first_touch` query followed by ten
+`warm_queries`; filesystem page-cache state remains uncontrolled. An optional
+`--wall-time-seconds` budget stops progression without discarding completed
+scale results. Report output is optional, JSON-only, and no-clobber; without
+`--output`, the complete report is written to stdout. This benchmark measures
+candidate retrieval only and does not make provenance decisions or predict
+full-system runtime. Completed, operator-maximum, and configured wall-time
+terminal reasons exit zero; correctness, resource, cleanup, worker, and unknown
+stop reasons retain the structured report but exit nonzero.
+
 ## Experimental crop reconstruction
 
 Crop reconstruction converts a content-provenance schema `1.1` manifest into a
