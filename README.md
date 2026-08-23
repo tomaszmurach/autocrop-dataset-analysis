@@ -270,6 +270,90 @@ full-system runtime. Completed, operator-maximum, and configured wall-time
 terminal reasons exit zero; correctness, resource, cleanup, worker, and unknown
 stop reasons retain the structured report but exit nonzero.
 
+### Research-only FLANN feasibility experiment
+
+The FLANN experiment compares OpenCV randomized KD-tree descriptor search with
+the unchanged exact BF-L2 oracle. It reuses the existing compact float32 SIFT
+corpus, source voting/ranking, K=50 shortlist, and support-count tie extension.
+It is not connected to the normal candidate-retrieval CLI or provenance
+verification, and it does not select FLANN as a production backend.
+
+OpenCV FLANN returns squared L2 distances for this API. The experiment validates
+the returned matrices and rows, then explicitly takes the square root before
+the existing source aggregation policy consumes the distances. Temporary saved
+FLANN artifacts are hash-checked and linked to the exact descriptor-corpus
+identity during each benchmark. They are released and deleted rather than
+published as a durable index format.
+
+Run deterministic synthetic known-source Recall@5/10/20/50 and exact-BF oracle
+agreement across the fixed initial grid:
+
+```powershell
+python -m autocrop_analysis.candidate_retrieval_flann_benchmark synthetic `
+  --corpus-size 64 `
+  --queries 20 `
+  --trees 1,4,8 `
+  --checks 32,64,128,256 `
+  --neighbor-depth 32 `
+  --output C:\private-output\flann-synthetic.private.json
+```
+
+The bounded-real mode consumes the existing exact candidate index, manual crop
+root, and exhaustive content-provenance report. Its results are explicitly
+prediction-consistency, not accuracy or ground-truth recall. Both the provenance
+input and required output must end exactly in `.private.json`; the output parent
+must already exist, the output must be new and outside the crop tree, and the
+complete report is written only to that private output. Successful stdout is an
+aggregate summary without client-derived filenames, private paths, or per-query
+records:
+
+```powershell
+python -m autocrop_analysis.candidate_retrieval_flann_benchmark bounded-real `
+  --index C:\private-output\candidate-index.private.json `
+  --cropped C:\path\to\manual-crops `
+  --provenance-predictions C:\private-output\content-results.private.json `
+  --trees 1,4,8 `
+  --checks 32,64,128,256 `
+  --neighbor-depth 32 `
+  --output C:\private-output\flann-bounded-real.private.json
+```
+
+Descriptor-scale runs are performance evidence only. The default maximum is the
+small 10,880-row smoke; larger runs require an explicit maximum. Each tree count
+is built in a fresh worker, saved, reloaded, and queried for every checks value.
+Two fresh-process repetitions independently characterize rebuild-to-rebuild
+descriptor-row, descriptor-distance, source-ranking, and shortlist-membership
+stability. The exact-BF reference worker uses the existing scale benchmark.
+
+```powershell
+# Small smoke
+python -m autocrop_analysis.candidate_retrieval_flann_scale_benchmark `
+  --max-descriptor-rows 10880 `
+  --trees 1,4,8 `
+  --checks 32,64,128,256 `
+  --output C:\private-output\flann-scale-smoke.private.json
+
+# Intermediate progression through 262,144 rows
+python -m autocrop_analysis.candidate_retrieval_flann_scale_benchmark `
+  --max-descriptor-rows 262144 `
+  --trees 1,4,8 `
+  --checks 32,64,128,256 `
+  --output C:\private-output\flann-scale-262144.private.json
+
+# Intended 1,279,872-row progression; operator-directed only
+python -m autocrop_analysis.candidate_retrieval_flann_scale_benchmark `
+  --max-descriptor-rows 1279872 `
+  --trees 1,4,8 `
+  --checks 32,64,128,256 `
+  --output C:\private-output\flann-scale-1279872.private.json
+```
+
+Reports keep synthetic known-source Recall, exact-BF oracle agreement,
+bounded-real prediction-consistency, and descriptor-only performance in
+separate namespaces. They include individual K=50 losses, build/save/load and
+query timings, artifact size, RSS/peak memory, and same-index, save/reload,
+same-process rebuild, or fresh-process stability where applicable.
+
 ## Experimental crop reconstruction
 
 Crop reconstruction converts a content-provenance schema `1.1` manifest into a
