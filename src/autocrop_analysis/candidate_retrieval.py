@@ -325,17 +325,59 @@ def retrieve_candidates(
                 combined.sort(key=lambda item: (item[0], item[1]))
                 del combined[parameters.neighbor_depth :]
 
+    return _rank_descriptor_neighbors(
+        nearest,
+        descriptor_rows=int(matrix.shape[0]),
+        originals=originals,
+        profiler=profiler,
+        item_ordinal=item_ordinal,
+    )
+
+
+def _rank_descriptor_neighbors(
+    nearest: Sequence[Sequence[tuple[float, int]]],
+    *,
+    descriptor_rows: int,
+    originals: Sequence[OriginalIndexRecord],
+    profiler: RetrievalProfiler | None = None,
+    item_ordinal: int | None = None,
+) -> tuple[RetrievalCandidate, ...]:
+    """Apply the established descriptor-owner voting and source ranking policy."""
+
+    if type(descriptor_rows) is not int or descriptor_rows <= 0:
+        raise ValueError("INVALID_INDEX_DESCRIPTOR_ROWS")
+    indexed = tuple(record for record in originals if record.descriptor_count > 0)
+    range_ends = np.asarray(
+        [record.descriptor_offset + record.descriptor_count for record in indexed],
+        dtype=np.int64,
+    )
+    if not indexed or int(range_ends[-1]) != descriptor_rows:
+        raise ValueError("INVALID_INDEX_DESCRIPTOR_RANGES")
+
     with profiling_stage(
         profiler, "query.vote_aggregation_ranking", item_ordinal=item_ordinal
     ) as ranking_timing:
         support: dict[int, list[float]] = defaultdict(list)
+        nearest_match_count = 0
         for matches in nearest:
             best_by_owner: dict[int, float] = {}
             for distance, row_index in matches:
+                nearest_match_count += 1
+                if (
+                    not isinstance(distance, (float, int, np.floating, np.integer))
+                    or not math.isfinite(float(distance))
+                    or float(distance) < 0.0
+                ):
+                    raise ValueError("INVALID_DESCRIPTOR_NEIGHBOR_DISTANCE")
+                if type(row_index) is not int or not 0 <= row_index < descriptor_rows:
+                    raise ValueError("INVALID_DESCRIPTOR_NEIGHBOR_ROW")
                 owner = int(np.searchsorted(range_ends, row_index, side="right"))
+                if owner >= len(indexed):
+                    raise ValueError("INVALID_DESCRIPTOR_NEIGHBOR_OWNER")
+                normalized_distance = float(distance)
                 previous = best_by_owner.get(owner)
-                if previous is None or distance < previous:
-                    best_by_owner[owner] = distance
+                if previous is None or normalized_distance < previous:
+                    best_by_owner[owner] = normalized_distance
             for owner, distance in best_by_owner.items():
                 support[owner].append(distance)
 
@@ -352,8 +394,8 @@ def retrieve_candidates(
         ranked = tuple(sorted(candidates, key=retrieval_candidate_sort_key))
         if profiler is not None:
             ranking_timing.add_work(
-                selected_query_descriptor_rows=int(query.shape[0]),
-                nearest_descriptor_matches=sum(len(matches) for matches in nearest),
+                selected_query_descriptor_rows=len(nearest),
+                nearest_descriptor_matches=nearest_match_count,
                 ranked_originals=len(ranked),
             )
         return ranked
